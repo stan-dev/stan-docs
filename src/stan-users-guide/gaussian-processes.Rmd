@@ -586,7 +586,72 @@ model {
   y ~ normal(f, sigma);
 }
 ```
+### Noise in Gaussian Process Regression Models
 
+In this section, we'll consider the function below, for no other reason than it has a nice non-linear shape that we can approximate nicely with Gaussian Process regression using a squared exponential kernel. We won't specify the noise immediately, since we'll consider a few different situations.
+
+$$
+f(x_i) = sin(\frac{x_i}{2\pi}) + sin(\frac{.7 x_i}{2\pi})
+$$
+and the observed data, with noise, is then:
+
+$$
+y_i = f(x_i) + \epsilon_i
+$$
+The function $f(x_i)$, without noise for $x=1,2,3,...,100$, looks like this
+
+//////////////GRAPHIC
+
+Previously, we have only considered a noiseless gaussian process. That is, we've fixed $\delta$ to a small constant not less than zero. In gaussian process regression, an identically distributed independent noise is equivalent to having $\delta$, for example, be normally distributed. Specifically, we can set
+
+$$
+\delta \sim normal(0, 1)_+
+$$
+In Stan, we can simulate a GP model with noise by declaring $\delta$ as a parameter and setting $\delta$ to be normally distributed, as above. For a Gaussian likelihood, function, a Stan snippet would be
+
+```
+parameters {
+  ...
+  real<lower=0> delta;
+}
+transformed parameters {
+  matrix[N, N] L_K;
+  {
+    matrix[N, N] K = gp_exp_quad_cov(x, sigma, l);
+    K = add_diag(K, square(delta));
+    L_K = cholesky_decompose(K);
+  }
+}
+model {
+  sigma ~ normal(0, 3);
+  l ~ normal(1, 3);
+  
+  delta ~ normal(0, 1);
+  
+  y ~ multi_normal_cholesky(mu, L_K);
+}
+```
+
+Here's what a Gaussian Process regression fit looks like when the true noise standard deviation is 1:
+
+//////////////GRAPHIC
+
+#### Using a Hierarchical Prior to Estimate Noise from the Data
+
+Unfortunately, this is not always the case, and instead, we could have noise for which that standard deviation is not exactly 1. Here's an example of a fit on simulated data when the noise model is misspecified:
+
+//////////////GRAPHIC
+
+In this case, we can use a slightly more sophisticated method and estimate the noise for the Gaussian Process regression model hierarchically. To do this, we assign a simple hyper prior to the noise of the Gaussian Process. Since the prior has a prior, we call this a hierarchy, and hence a hierarchical prior. Probabilistically, we define the noise model as follows:
+
+$$
+\delta_0 \sim normal_+(0, 100)\\
+\delta \sim normal_+(0, \delta_0)
+$$
+
+We set the prior for the noise more diffuse, and then the noise for the Gaussian Process is estimated from the data. Beware, however, since the hyper prior is more diffuse and the true noise is likely less diffuse, this sub-model has potential to funnel and sample slowly. Here's a statistical graphic of the exact same model, and hence the same Stan code, except when the true noise standard deviation of the simulated data is .5 and 2 respectively. The graphic where seeing is the in sample posterior predictive interval of $\tilde{y}$.
+
+//////////////GRAPHIC
 
 ### Priors for Gaussian process parameters {#priors-gp.section}
 
@@ -1086,3 +1151,98 @@ generated quantities {
   Omega = L_Omega * L_Omega';
 }
 ```
+
+## Supported Covariance Functions
+
+Currently, Stan supports several build in covariance functions (kernels). These are the squared exponential, also known as the radial basis function or the gaussian kernel, a dot product or linear covariance function, the periodic covariance function, and three additional special cases of the Matern covariance function, that are the Matern 5/2 kernel, Matern 3/2 and the Matern 1/2 covariance function, or the exponential covariance function. We will review functional form, implementation and provide a visualization with simulated data below.
+
+### The Squared Exponential
+
+A common choice for a covariance function is the Squared Exponential covariance function. This is also known as the Radial Basis Function or the Gaussian kernel, due to the fact that its function resembles a gaussian. The functional form is as follows
+
+$$
+K(x, x' \mid \sigma, l) = \sigma^2 \exp\left(-\dfrac{||x - x'||_2^2}{2 l^2}\right).
+$$
+for $\sigma,l \geq 0$, where $||\cdot||_2^2$ is the squared l-2 norm, and $x$ and $x'$ are observations of design matrix $X$. The $K_{i,j}$ will then be the covariance computed between rows $i$ and $j$ of the design matrix. Here's what draws from the squared exponential kernel look like, before and after being conditioned on data, with fixed hyper priors for the magntitude parameter $\sigma^2$ and length-scale parameter $l$:
+
+//////////////GRAPHIC
+
+We can sample from a multivariate gaussian distribution in Stan by first instantiating a covariance matrix, for example for `vector[D] x[N]`, and parameters `real<lower=0> sigma` and `real<lower=0> length_scale` as
+
+```
+matrix[N, N] K = gp_exp_quad_cov(x, sigma, l)
+```
+
+And then we add noise and sample from a multivariate gaussian distribution using cholesky decomposition:
+
+```
+
+transformed parameters {
+  vector[N] f;
+  matrix[N, N] L_K;
+  K = add_diag(K, epsilon);
+  L_K = choleskey_decompose(K);
+  f = L_K * eta;
+}
+...
+model {
+  eta ~ normal(0, 1);
+}
+```
+Where since $\eta \sim normal(0, 1)$, $f$ is distributed multivariate normal.
+
+We can implement a gaussian process regression model with a Squared Exponential kernel, along with the posterior predictive for the regression model as follows:
+
+
+### The Dot Product Covariance Function
+
+The dot product kernel, or linear kernel, is analogous to a Bayesian linear regression with a normal(0, 1) prior on regression coefficients. This can be combined with other covariance functions to interpolate linear trends in data, but that will be discussed in a later chapter. The analytic form is simply an inner product between observations $x$ and $x'$, with bias parameter $\sigma_0 > 0$ and inner product $(\cdot, \cdot)$:
+
+$$
+K(x, x' \mid \sigma, l) = \sigma_0^2 + (x', x)
+$$
+
+We can define a dot product covariance function almost identicle to defining the squared exponential covariance function, instead as `gp_dot_prod_cov` with a constant parameter $\sigma_0$, for training data `matrix[D] x[N]`, an $N\times D$ matrix as
+
+```
+matrix[N, N] K = gp_dot_prod_cov(x, sigma0)
+```
+
+and for the cross covariance matrix with $N_{pred} \times D$ `matrix[D] x[N_pred] x_pred` as:
+
+```
+matrix[N, N_pred] K gp_dot_prod_cov(x_pred, x, sigma0)
+
+```
+
+Fixing the bias parameter, we can generate samples from the linear kernel (left) and the linear kernel fitting a linear function:
+
+//////////////GRAPHIC
+
+The code for fitting a linear model in Stan with a Gaussian Process is almost indenticle to that of fitting a GP regression with a squared exponential kernel, but instead replacing every instance of `gp_exp_quad_cov` with `gp_dot_prod_cov` and declaring and using parameteres for the dot product kernel, accordingly.
+
+### The Periodic Covariance Function
+
+The periodic covariance function is used to interpolate periodic trends in data, and can be used to model anything that follows a periodic pattern, such as seasonal trends or oscillations in time. The parameterization of the periodic covariance function is similar to that of the squared expontential, but with the addition of one more parameter, a period parameter. It's common to fix the period based on application, and is difficult to estimate. For example, the period could be fixed to days in a year. The periodic covariance function, with times $t, t'$ as
+
+$$
+K(t, t' \mid \sigma, l, \rho) = \sigma^2 \exp\left(\dfrac{-2 sin^2(\pi(t - t')/ \rho)}{2 l^2}\right).
+$$
+
+For $\sigma > 0$, $l > 0$ , and $\rho > 0$. We use $t$ since it is common to see the periodic covariance function used in time series application. Typically, $t$ will denote points measured in time. If data is measured at evenly spaced time points, we might set $t$ as $\mathbf{t}=[1,2,3,...,T]'$ where $T$ is the maximum number of measured time points, $\mathbf{t}$ is a column vector and the apostrophe indictaces the transpose. If $t$ isn't measured at evenly spaced time points, $t$ need not necessarily be such that $t_i-t_{i+1}$ for  all $i=1,2,3,...,T$. It is common to rescale $\mathbf{t}$ so that the integral to approximate is compatible with Stan's sampler. In order to approximate the periodic function well, we might instead set $t$ as $s(t) = t \space mod \space \rho$, where $mod$ is the modulus operator. In that case the periodic covariance function becomes
+
+$$
+K(t, t' \mid \sigma, l, \rho) = \sigma^2 \exp\left(\dfrac{-2 sin^2(\pi(s(t) - s(t'))/ \rho)}{2 l^2}\right).
+$$
+
+Calls of the periodic covariance function for a training covariance matrix and cross covariance matrix in Stan, respectively, look like
+
+```
+matrix[N, N] K = gp_periodic_cov(x, sigma, l, rho);
+matrix[N, N_pred] K_cross = gp_periodic_cov(x, x_pred, sigma, l, rho);
+```
+
+Here's an example of the periodic function interpolating a simulated sine wave with gaussian noise:
+
+//////////////GRAPHIC
+
